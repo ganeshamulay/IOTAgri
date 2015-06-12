@@ -1,25 +1,20 @@
-//#include <SoftwareSerial.h>
-#include <VirtualWire.h>
-
+#include <Manchester.h>
 String msg = String("");
 String NoStore= String("");
 String FarmData= String("");
-
-int  com, quant;
-float field1, field2, field3, field4, percentage;
 String overall= String("");
+
+int quant;
+int WaterData;
+float field[11];
+float percentage;
+
 // EN: Set to 1 when the next GPRS shield message will contains the SMS message
 const int ledTx = 8; //green
 const int ledRx = 7; //red
  
 const int tx_pin= 12;// tx 
-const int rx_pin= 11; //rx
-
-int Command; // tx 
-char CommandMsg[5]; 
-int WaterData; // rx
-char WaterDataMsg[5];
-
+const int rx_pin= 9; //rx
 
 byte flag= 1;
 int SmsContentFlag = 0;
@@ -28,18 +23,23 @@ int hang=0;
 int relay_a=4;
 void setup()
 {
- pinMode(ledTx,OUTPUT);
+ pinMode(ledTx,OUTPUT);  // declare pins
  pinMode(ledRx,OUTPUT);
- //pinMode(Sensor1Pin,INPUT);
+ pinMode( relay_a, OUTPUT );
+
  digitalWrite(ledTx, HIGH);
- digitalWrite(13, LOW);
  digitalWrite(ledRx, LOW);
+ digitalWrite( relay_a, LOW );
  
- vw_setup(2000);
+ man.setupReceive(rx_pin, MAN_1200);  // setup rf module tx and rx
+ man.beginReceive();
+ man.setupTransmit(tx_pin, MAN_1200);
  
-  Serial.begin(9600);   // the GPRS baud rate
-  pinMode( 4, OUTPUT );
-  digitalWrite( 4, LOW );
+
+ 
+ Serial.begin(9600);   // the GPRS baud rate
+ 
+  
  Serial.println("AT");
  delay(2000);
  Serial.println("AT+CLIP=1");
@@ -97,7 +97,7 @@ void send(String no, String s){
     delay(100);
     while(!(msg.substring(msg.indexOf('>'))));
     {
-      Serial.print(s + " To on the Pump Send ON, To switch off the motor send OFF!!");
+      Serial.print("Data: "+ s + "Send ON or OFF");
       delay(500);
       Serial.write(0x1A); // sends ctrl+z end of message
       Serial.write(0x0D); // Carriage Return in Hex
@@ -121,6 +121,33 @@ void ProcessGprsMsg() {
      GprsTextModeSMS();
   }
   
+   if( (msg.indexOf( "+CLIP:" ) >= 0)  && (flag==1) )
+    {
+    // EN: Next message will contains the BODY of SMS
+    
+    int Pos = msg.indexOf( "+91" );
+    NoStore = msg.substring( Pos, Pos+13 );
+    Serial.print( "Mobile no: " );
+    Serial.println( NoStore );
+    
+    hang=1;
+    flag=0;
+    delay(500);
+    ClearGprsMsg();
+    return;
+    }
+    
+    if(hang==1)
+    {
+    delay(2000);
+    Serial.println("ATH");
+    delay(5000);
+    hang=0;
+    FarmData = getData();
+    //Serial.println(FarmData);
+    //send(NoStore, FarmData);
+    }
+  
   // EN: unsolicited message received when getting a SMS message
   if( msg.indexOf( "+CMTI" ) >= 0 ){
      Serial.println( "*** SMS Received ***" );
@@ -142,41 +169,7 @@ void ProcessGprsMsg() {
     ClearGprsMsg();
     return;
   }
-  
-      if( (msg.indexOf( "+CLIP:" ) >= 0)  && (flag==1) )
-    {
-    // EN: Next message will contains the BODY of SMS
-    
-    int Pos = msg.indexOf( "+91" );
-    NoStore = msg.substring( Pos, Pos+13 );
-    Serial.print( "Mobile no: " );
-    Serial.println( NoStore );
-    
-    hang=1;
-    
-    
-    flag=0;
-    
-    // EN: Following lines are essentiel to not clear the flag!
-    delay(500);
-    ClearGprsMsg();
-    return;
-    }
-    
-    if(hang==1)
-    {
-    delay(2000);
-    Serial.println("ATH");
-    delay(5000);
-    hang=0;
-    FarmData = getData();
-    Serial.println(FarmData);
-    //send(NoStore, FarmData);
-    }
-    
 
-
-  
   // EN: +CMGR message just before indicate that the following GRPS Shield message 
   //     (this message) will contains the SMS body 
   if( SmsContentFlag == 1 ){
@@ -189,6 +182,7 @@ void ProcessGprsMsg() {
   ClearGprsMsg();
   // EN: Always clear the flag
   SmsContentFlag = 0; 
+  flag=1;
 }
 void ProcessSms( String sms ){
   
@@ -200,118 +194,63 @@ void ProcessSms( String sms ){
   }
 }
 
-void onRec() {
-    // Initialise the IO and ISR
-    // Required for DR3100
-    vw_set_ptt_inverted(true); 
-    // Start the receiver PLL running
-    vw_set_rx_pin(rx_pin);
-    vw_rx_start();       
-}
 
-void offRec()
-{
-  vw_rx_stop();
-}
-
-void transmit(int Command) {
-  vw_set_tx_pin(tx_pin);
-   // Convert integer data to Char array directly 
-  itoa(Command,CommandMsg,10);
-  
-  
-  Serial.print("Command for ATtiny ");
-  Serial.print(Command);
-  Serial.print(" Command msg for ATTiny: ");
-  Serial.print(CommandMsg);
-  Serial.println(" ");
+void transmitTx(int command) {
  
- digitalWrite(ledTx, LOW); // Turn on a light to show transmitting
- vw_send((uint8_t *)CommandMsg, strlen(CommandMsg));
-
- vw_wait_tx(); // Wait until the whole message is gone
- //digitalWrite(ledTx, false); // Turn off a light after transmission
+  delay(50);
+  Serial.print("Command for ATtiny: ");
+  Serial.println(command);
+  digitalWrite(ledTx, HIGH); // Turn on a light to show transmitting
+  man.transmit(command);
+  digitalWrite(ledTx, LOW); // Turn off a light after transmission
+  delay(200);
 } // END void loop...
 
 /*rf receiver*/
 
-
-
-
-int receive(){
-    uint8_t buf[VW_MAX_MESSAGE_LEN];
-    uint8_t buflen = VW_MAX_MESSAGE_LEN;
-    
-    
-    // Non-blocking
-    if (vw_get_message(buf, &buflen)) 
+int receiveRx(){
+  Serial.println("running");
+   if (man.receiveComplete())
     {
-	int i;
-        // Turn on a light to show received good message 
-        digitalWrite(ledRx, true); 
-	
-        // Message with a good checksum received, dump it. 
-        for (i = 0; i < buflen; i++)
-	{               
-          WaterDataMsg[i] = char(buf[i]);
-	}
-        WaterDataMsg[buflen] = '\0';
-        
-        // Convert CommandMsg Char array to integer
-        WaterData = atoi(WaterDataMsg);
+        digitalWrite(ledRx, HIGH);
+        WaterData= man.getMessage(); 
         Serial.print("Sensor 1: ");
         Serial.println(WaterData);
-        return WaterData;
-
-                
-        // Turn off light to and await next message 
-        //digitalWrite(ledRx, false);
-        
+        digitalWrite(ledRx, LOW); 
+        //man.beginReceive();   
     }
-    
+    return WaterData;   
 }
 
 String getData()
 {
-  Serial.println("Getting data from field 1");
-  field1= water(1);
-  Serial.println("Field 1 has " + (String)field1 + "% Water");
-  
-  /*Serial.println("Getting data from field 2");
-  field2= water(2);
-  Serial.println("Field 2 has " + (String)field2 + "% Water");
-  
-  Serial.println("Getting data from field 3");
-  field3= water(3);
-  Serial.println("Field 3 has " + (String)field3 + "% Water");
-  
-  Serial.println("Getting data from field 4");
-  field1= water(4);
-  Serial.println("Field 4 has " + (String)field4 + "% Water");*/
-  
-  overall = ("Field 1: "+ (String)field1 /*+ "% Field 2: "+ (String)field2 + "% Field 3: "+ (String)field3 + "% Field 4: "+ (String)field4 + "%"*/  );
-  return overall;
-  
+  Serial.println("Getting data from field");
+  for(int j=1;j<=1;j++)
+  {
+    field[j]= water(j);
+    overall= overall + "Field " + (String)j + ":" + (String)field[j] + "%";
+  }
+  Serial.println(overall);
+  return overall;  
 }
 
 float water(int com)
 {
-  offRec();
-  Serial.println("Transmitting command for field " + (String)com );
-  transmit(com);
-  Serial.println("Receiving data from field" + (String)com );
-  onRec();
-  quant= receive();
-  /*while(quant==0)
-  {
-    offRec();
-    transmit(com);
-    onRec();
-    quant= receive();
-    Serial.println(quant);
-   }*/
-  percentage = 100*(1023- quant)/1023;
+  int x= com;
+  int i=0;
+  pinMode(ledTx, HIGH);
+  
+  Serial.println("Sending command");
+  transmitTx(x);
+  man.beginReceive();
+  quant= receiveRx();
+  while(quant==0)
+  {  
+    Serial.println("not yet " + (String)quant);
+    quant= receiveRx(); 
+  }
   Serial.println(quant);
+  percentage= 100*(1-(((float)quant)/1023));
   return percentage;
 }
 
